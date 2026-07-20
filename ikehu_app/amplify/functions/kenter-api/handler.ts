@@ -23,20 +23,10 @@ const KENTER_API_BASE_URL = 'https://api.kenter.nu';
 
 let cachedToken: { accessToken: string; expiresAt: number } | undefined;
 
-export function buildCorsHeaders(): Record<string, string> {
-  return {
-    'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGIN || '*',
-    'Access-Control-Allow-Headers': 'content-type,authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Max-Age': '86400',
-  };
-}
-
 function jsonResponse(statusCode: number, body: unknown): LambdaResponse {
   return {
     statusCode,
     headers: {
-      ...buildCorsHeaders(),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
@@ -145,7 +135,7 @@ export function createHandler(fetchImpl: FetchLike = fetch) {
     const path = event.rawPath ?? event.path ?? '/';
 
     if (method === 'OPTIONS') {
-      return { statusCode: 204, headers: buildCorsHeaders(), body: '' };
+      return { statusCode: 204, headers: {}, body: '' };
     }
 
     try {
@@ -188,4 +178,3 @@ export function createHandler(fetchImpl: FetchLike = fetch) {
 }
 
 export const handler = createHandler();
-

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
-  buildCorsHeaders,
   createHandler,
   isAllowedMeasurementPath,
   parseJsonBody,
@@ -37,12 +36,6 @@ test('parseJsonBody decodes base64 encoded request bodies', () => {
   assert.deepEqual(parseJsonBody(encoded, true), { url: '/meetdata/v2/measurements/test' });
 });
 
-test('buildCorsHeaders uses the configured origin', () => {
-  process.env.ALLOWED_ORIGIN = 'https://noctrick.github.io';
-
-  assert.equal(buildCorsHeaders()['Access-Control-Allow-Origin'], 'https://noctrick.github.io');
-});
-
 test('health reports missing Kenter credentials without calling Kenter', async () => {
   delete process.env.KENTER_CLIENT_ID;
   delete process.env.KENTER_CLIENT_SECRET;
@@ -55,6 +48,7 @@ test('health reports missing Kenter credentials without calling Kenter', async (
   const body = JSON.parse(response.body);
 
   assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.headers, { 'Content-Type': 'application/json' });
   assert.equal(body.ok, true);
   assert.equal(body.configured, false);
 });
@@ -107,4 +101,3 @@ test('meters route obtains a token and forwards the Kenter response', async () =
   assert.equal(calls[1].url, 'https://api.kenter.nu/meetdata/v2/meters?updates_days=0');
   assert.equal((calls[1].init?.headers as Record<string, string>).Authorization, 'Bearer token');
 });
-

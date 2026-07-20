@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
+  clearTokenCacheForTests,
   createHandler,
   isAllowedMeasurementPath,
   parseJsonBody,
@@ -10,6 +11,7 @@ const originalEnv = { ...process.env };
 
 afterEach(() => {
   process.env = { ...originalEnv };
+  clearTokenCacheForTests();
 });
 
 test('isAllowedMeasurementPath accepts only relative Kenter measurement paths', () => {
@@ -100,4 +102,87 @@ test('meters route obtains a token and forwards the Kenter response', async () =
   assert.deepEqual(body.data, [{ connectionId: '123' }]);
   assert.equal(calls[1].url, 'https://api.kenter.nu/meetdata/v2/meters?updates_days=0');
   assert.equal((calls[1].init?.headers as Record<string, string>).Authorization, 'Bearer token');
+});
+
+test('meters route returns fresh cached data without calling Kenter', async () => {
+  const handler = createHandler(
+    async () => {
+      throw new Error('fetch should not be called');
+    },
+    {
+      async get() {
+        return {
+          fetchedAt: new Date().toISOString(),
+          response: {
+            status: 200,
+            ok: true,
+            data: [{ connectionId: 'cached' }],
+          },
+        };
+      },
+      async put() {
+        throw new Error('put should not be called');
+      },
+    },
+  );
+
+  const response = await handler({ rawPath: '/meters', requestContext: { http: { method: 'GET' } } });
+  const body = JSON.parse(response.body);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(body.data, [{ connectionId: 'cached' }]);
+  assert.equal(body.cache.hit, true);
+});
+
+test('meters refresh fetches Kenter and stores the result', async () => {
+  process.env.KENTER_CLIENT_ID = 'client';
+  process.env.KENTER_CLIENT_SECRET = 'secret';
+
+  let storedData: unknown;
+  const calls: Array<string> = [];
+  const handler = createHandler(
+    async (url) => {
+      calls.push(String(url));
+
+      if (String(url).includes('/connect/token')) {
+        return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify([{ connectionId: 'fresh' }]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+    {
+      async get() {
+        return {
+          fetchedAt: new Date().toISOString(),
+          response: {
+            status: 200,
+            ok: true,
+            data: [{ connectionId: 'cached' }],
+          },
+        };
+      },
+      async put(entry) {
+        storedData = entry.response.data;
+      },
+    },
+  );
+
+  const response = await handler({
+    rawPath: '/meters/refresh',
+    requestContext: { http: { method: 'GET' } },
+  });
+  const body = JSON.parse(response.body);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(body.data, [{ connectionId: 'fresh' }]);
+  assert.deepEqual(storedData, [{ connectionId: 'fresh' }]);
+  assert.equal(body.cache.hit, false);
+  assert.equal(body.cache.stored, true);
 });

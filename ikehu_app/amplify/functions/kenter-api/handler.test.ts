@@ -186,3 +186,79 @@ test('meters refresh fetches Kenter and stores the result', async () => {
   assert.equal(body.cache.hit, false);
   assert.equal(body.cache.stored, true);
 });
+
+test('monthly usage route fetches month data and stores kwartierdata metadata', async () => {
+  process.env.KENTER_CLIENT_ID = 'client';
+  process.env.KENTER_CLIENT_SECRET = 'secret';
+
+  let storedImport: unknown;
+  const calls: Array<string> = [];
+  const handler = createHandler(
+    async (url) => {
+      calls.push(String(url));
+
+      if (String(url).includes('/connect/token')) {
+        return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      return new Response(
+        JSON.stringify([
+          {
+            channelId: '1.8.1',
+            measurementResolutions: [{ resolution: 'PT15M', start: 1782864000, end: 1785542400 }],
+            Measurements: [{ timestamp: 1782864000, value: 12.34, origin: 'Measured', status: 'Valid' }],
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    },
+    undefined,
+    {
+      async putUsageMonth(entry) {
+        storedImport = entry;
+      },
+    },
+  );
+
+  const response = await handler({
+    rawPath: '/usage/month',
+    requestContext: { http: { method: 'POST' } },
+    body: JSON.stringify({
+      connectionId: '871690460000012374',
+      meteringPointId: '00053131',
+      year: 2026,
+      month: 7,
+    }),
+  });
+  const body = JSON.parse(response.body);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(
+    calls[1],
+    'https://api.kenter.nu/meetdata/v2/measurements/connections/871690460000012374/metering-points/00053131/months/2026/07',
+  );
+  assert.equal(body.stored, true);
+  assert.equal(body.hasQuarterHourData, true);
+  assert.deepEqual(body.resolutions, ['PT15M']);
+  assert.deepEqual(storedImport, {
+    connectionId: '871690460000012374',
+    meteringPointId: '00053131',
+    year: 2026,
+    month: 7,
+    sourcePath:
+      '/meetdata/v2/measurements/connections/871690460000012374/metering-points/00053131/months/2026/07',
+    kenterStatus: 200,
+    hasQuarterHourData: true,
+    resolutions: ['PT15M'],
+    rawResponse: [
+      {
+        channelId: '1.8.1',
+        measurementResolutions: [{ resolution: 'PT15M', start: 1782864000, end: 1785542400 }],
+        Measurements: [{ timestamp: 1782864000, value: 12.34, origin: 'Measured', status: 'Valid' }],
+      },
+    ],
+  });
+});

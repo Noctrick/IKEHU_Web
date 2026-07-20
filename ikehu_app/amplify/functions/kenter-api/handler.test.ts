@@ -262,3 +262,84 @@ test('monthly usage route fetches month data and stores kwartierdata metadata', 
     ],
   });
 });
+
+test('bulk monthly usage route imports every metering point from cached meters', async () => {
+  process.env.KENTER_CLIENT_ID = 'client';
+  process.env.KENTER_CLIENT_SECRET = 'secret';
+
+  const storedImports: Array<unknown> = [];
+  const calls: Array<string> = [];
+  const handler = createHandler(
+    async (url) => {
+      calls.push(String(url));
+
+      if (String(url).includes('/connect/token')) {
+        return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      return new Response(
+        JSON.stringify([
+          {
+            channelId: '1.8.1',
+            measurementResolutions: [{ resolution: '15min', start: 1782864000, end: 1785542400 }],
+            Measurements: [{ timestamp: 1782864000, value: 1, origin: 'Measured', status: 'Valid' }],
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    },
+    {
+      async get() {
+        return {
+          fetchedAt: new Date().toISOString(),
+          response: {
+            status: 200,
+            ok: true,
+            data: [
+              {
+                connectionId: '871690460000012374',
+                meteringPoints: [{ meteringPointId: '00053131' }, { meteringPointId: '00054554' }],
+              },
+              {
+                connectionId: '871690460000099999',
+                meteringPoints: [{ meteringPointId: '00099999' }],
+              },
+            ],
+          },
+        };
+      },
+      async put() {
+        throw new Error('put should not be called');
+      },
+    },
+    {
+      async putUsageMonth(entry) {
+        storedImports.push(entry);
+      },
+    },
+  );
+
+  const response = await handler({
+    rawPath: '/usage/month/bulk',
+    requestContext: { http: { method: 'POST' } },
+    body: JSON.stringify({ year: 2026, month: 7 }),
+  });
+  const body = JSON.parse(response.body);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(body.total, 3);
+  assert.equal(body.succeeded, 3);
+  assert.equal(body.failed, 0);
+  assert.equal(storedImports.length, 3);
+  assert.deepEqual(
+    calls.filter((url) => url.includes('/months/2026/07')),
+    [
+      'https://api.kenter.nu/meetdata/v2/measurements/connections/871690460000012374/metering-points/00053131/months/2026/07',
+      'https://api.kenter.nu/meetdata/v2/measurements/connections/871690460000012374/metering-points/00054554/months/2026/07',
+      'https://api.kenter.nu/meetdata/v2/measurements/connections/871690460000099999/metering-points/00099999/months/2026/07',
+    ],
+  );
+});

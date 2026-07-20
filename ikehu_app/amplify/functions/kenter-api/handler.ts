@@ -64,6 +64,11 @@ type UsageStore = {
   putUsageMonth(entry: UsageMonthEntry): Promise<void>;
 };
 
+type UsageMonthTarget = {
+  connectionId: string;
+  meteringPointId: string;
+};
+
 function jsonResponse(statusCode: number, body: unknown): LambdaResponse {
   return {
     statusCode,
@@ -452,6 +457,21 @@ function assertUsageMonthInput(body: Record<string, unknown>) {
   return { connectionId, meteringPointId, year, month };
 }
 
+function assertUsageMonthPeriodInput(body: Record<string, unknown>) {
+  const year = Number(body.year);
+  const month = Number(body.month);
+
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    throw new Error('year moet een geldig jaar zijn.');
+  }
+
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error('month moet tussen 1 en 12 liggen.');
+  }
+
+  return { year, month };
+}
+
 function createUsageStore(fetchImpl: FetchLike): UsageStore | undefined {
   const tableName = process.env.KENTER_USAGE_TABLE;
   const rawBucket = process.env.KENTER_USAGE_RAW_BUCKET;
@@ -562,6 +582,24 @@ async function importUsageMonth(
   body: Record<string, unknown>,
 ) {
   const input = assertUsageMonthInput(body);
+  const result = await fetchAndStoreUsageMonth(fetchImpl, store, input);
+
+  return jsonResponse(result.status, {
+    ...result,
+    data: result.data,
+  });
+}
+
+async function fetchAndStoreUsageMonth(
+  fetchImpl: FetchLike,
+  store: UsageStore | undefined,
+  input: {
+    connectionId: string;
+    meteringPointId: string;
+    year: number;
+    month: number;
+  },
+) {
   const paddedMonth = String(input.month).padStart(2, '0');
   const sourcePath =
     `/meetdata/v2/measurements/connections/${input.connectionId}` +
@@ -581,7 +619,7 @@ async function importUsageMonth(
     });
   }
 
-  return jsonResponse(response.status, {
+  return {
     status: response.status,
     ok: response.ok,
     stored: Boolean(store && response.ok),
@@ -590,6 +628,130 @@ async function importUsageMonth(
     sourcePath,
     measurementCount: countMeasurements(response.data),
     data: response.data,
+  };
+}
+
+function extractUsageMonthTargets(metersData: unknown): UsageMonthTarget[] {
+  if (!Array.isArray(metersData)) {
+    return [];
+  }
+
+  const targets: UsageMonthTarget[] = [];
+
+  for (const connection of metersData) {
+    if (typeof connection !== 'object' || connection === null) {
+      continue;
+    }
+
+    const connectionRecord = connection as Record<string, unknown>;
+    const connectionId =
+      typeof connectionRecord.connectionId === 'string' ? connectionRecord.connectionId.trim() : '';
+    const meteringPoints = connectionRecord.meteringPoints;
+
+    if (!/^\d{13,18}$/.test(connectionId) || !Array.isArray(meteringPoints)) {
+      continue;
+    }
+
+    for (const meteringPoint of meteringPoints) {
+      if (typeof meteringPoint !== 'object' || meteringPoint === null) {
+        continue;
+      }
+
+      const meteringPointId = (meteringPoint as Record<string, unknown>).meteringPointId;
+
+      if (typeof meteringPointId === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(meteringPointId)) {
+        targets.push({ connectionId, meteringPointId });
+      }
+    }
+  }
+
+  return targets;
+}
+
+async function wait(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function importUsageMonthBulk(
+  fetchImpl: FetchLike,
+  meterStore: MeterStore | undefined,
+  usageStore: UsageStore | undefined,
+  body: Record<string, unknown>,
+) {
+  const { year, month } = assertUsageMonthPeriodInput(body);
+  const delayMs = Number(process.env.KENTER_BULK_MONTH_DELAY_MS ?? 1100);
+
+  if (!meterStore) {
+    return jsonResponse(500, { error: 'Meter cache is not configured.' });
+  }
+
+  const cachedMeters = await meterStore.get();
+
+  if (!cachedMeters?.response.ok) {
+    return jsonResponse(409, { error: 'Geen geldige meterlijst-cache gevonden. Run eerst Refresh meters.' });
+  }
+
+  const targets = extractUsageMonthTargets(cachedMeters.response.data);
+  const results: Array<{
+    connectionId: string;
+    meteringPointId: string;
+    status: number | 'error';
+    ok: boolean;
+    stored: boolean;
+    hasQuarterHourData?: boolean;
+    resolutions?: string[];
+    measurementCount?: number;
+    error?: string;
+  }> = [];
+
+  for (const [index, target] of targets.entries()) {
+    if (index > 0) {
+      await wait(delayMs);
+    }
+
+    try {
+      const result = await fetchAndStoreUsageMonth(fetchImpl, usageStore, {
+        ...target,
+        year,
+        month,
+      });
+
+      results.push({
+        connectionId: target.connectionId,
+        meteringPointId: target.meteringPointId,
+        status: result.status,
+        ok: result.ok,
+        stored: result.stored,
+        hasQuarterHourData: result.hasQuarterHourData,
+        resolutions: result.resolutions,
+        measurementCount: result.measurementCount,
+      });
+    } catch (error) {
+      results.push({
+        connectionId: target.connectionId,
+        meteringPointId: target.meteringPointId,
+        status: 'error',
+        ok: false,
+        stored: false,
+        error: error instanceof Error ? error.message : 'Unexpected monthly import error.',
+      });
+    }
+  }
+
+  const succeeded = results.filter((result) => result.ok && result.stored).length;
+  const failed = results.length - succeeded;
+
+  return jsonResponse(200, {
+    year,
+    month,
+    total: results.length,
+    succeeded,
+    failed,
+    results,
   });
 }
 
@@ -632,6 +794,11 @@ export function createHandler(
       if (method === 'POST' && path === '/usage/month') {
         const body = parseJsonBody(event.body, event.isBase64Encoded);
         return importUsageMonth(fetchImpl, usageStore, body);
+      }
+
+      if (method === 'POST' && path === '/usage/month/bulk') {
+        const body = parseJsonBody(event.body, event.isBase64Encoded);
+        return importUsageMonthBulk(fetchImpl, meterStore, usageStore, body);
       }
 
       if (method === 'POST' && path === '/fetch-url') {

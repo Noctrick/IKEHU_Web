@@ -60,8 +60,29 @@ type UsageMonthEntry = {
   rawResponse: unknown;
 };
 
+type UsageMonthSummary = {
+  connectionId: string;
+  meteringPointId: string;
+  year: number;
+  month: number;
+  hasQuarterHourData: boolean;
+  resolutions: string[];
+  measurementCount: number;
+  channelCount?: number;
+  rawS3Bucket: string;
+  rawS3Key: string;
+  importedAt?: string;
+};
+
 type UsageStore = {
   putUsageMonth(entry: UsageMonthEntry): Promise<void>;
+  listUsageMonths(filter: { year?: number; month?: number }): Promise<UsageMonthSummary[]>;
+  getUsageMonth(input: {
+    connectionId: string;
+    meteringPointId: string;
+    year: number;
+    month: number;
+  }): Promise<{ summary: UsageMonthSummary; rawResponse: unknown } | undefined>;
 };
 
 type UsageMonthTarget = {
@@ -76,6 +97,16 @@ function jsonResponse(statusCode: number, body: unknown): LambdaResponse {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+  };
+}
+
+function textResponse(statusCode: number, body: string, contentType: string): LambdaResponse {
+  return {
+    statusCode,
+    headers: {
+      'Content-Type': contentType,
+    },
+    body,
   };
 }
 
@@ -472,6 +503,82 @@ function assertUsageMonthPeriodInput(body: Record<string, unknown>) {
   return { year, month };
 }
 
+function parseUsageMonthQuery(query: URLSearchParams) {
+  return assertUsageMonthInput({
+    connectionId: query.get('connectionId') || '',
+    meteringPointId: query.get('meteringPointId') || '',
+    year: query.get('year') || '',
+    month: query.get('month') || '',
+  });
+}
+
+function parseOptionalUsageMonthFilter(query: URLSearchParams) {
+  const yearValue = query.get('year');
+  const monthValue = query.get('month');
+  const filter: { year?: number; month?: number } = {};
+
+  if (yearValue) {
+    const year = Number(yearValue);
+
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+      throw new Error('year moet een geldig jaar zijn.');
+    }
+
+    filter.year = year;
+  }
+
+  if (monthValue) {
+    const month = Number(monthValue);
+
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+      throw new Error('month moet tussen 1 en 12 liggen.');
+    }
+
+    filter.month = month;
+  }
+
+  return filter;
+}
+
+type DynamoAttribute = {
+  S?: string;
+  N?: string;
+  BOOL?: boolean;
+  L?: DynamoAttribute[];
+};
+
+function dynamoString(item: Record<string, DynamoAttribute>, key: string): string {
+  return item[key]?.S || '';
+}
+
+function dynamoNumber(item: Record<string, DynamoAttribute>, key: string): number {
+  return Number(item[key]?.N || 0);
+}
+
+function dynamoBoolean(item: Record<string, DynamoAttribute>, key: string): boolean {
+  return Boolean(item[key]?.BOOL);
+}
+
+function dynamoStringList(item: Record<string, DynamoAttribute>, key: string): string[] {
+  return (item[key]?.L || []).map((value) => value.S || '').filter(Boolean);
+}
+
+function usageSummaryFromDynamo(item: Record<string, DynamoAttribute>): UsageMonthSummary {
+  return {
+    connectionId: dynamoString(item, 'connectionId'),
+    meteringPointId: dynamoString(item, 'meteringPointId'),
+    year: dynamoNumber(item, 'year'),
+    month: dynamoNumber(item, 'month'),
+    hasQuarterHourData: dynamoBoolean(item, 'hasQuarterHourData'),
+    resolutions: dynamoStringList(item, 'resolutions'),
+    measurementCount: dynamoNumber(item, 'measurementCount'),
+    channelCount: dynamoNumber(item, 'channelCount'),
+    rawS3Bucket: dynamoString(item, 'rawS3Bucket'),
+    rawS3Key: dynamoString(item, 'rawS3Key'),
+    importedAt: dynamoString(item, 'importedAt'),
+  };
+}
+
 function createUsageStore(fetchImpl: FetchLike): UsageStore | undefined {
   const tableName = process.env.KENTER_USAGE_TABLE;
   const rawBucket = process.env.KENTER_USAGE_RAW_BUCKET;
@@ -533,6 +640,94 @@ function createUsageStore(fetchImpl: FetchLike): UsageStore | undefined {
       if (!response.ok) {
         throw new Error(`DynamoDB usage write failed with status ${response.status}.`);
       }
+    },
+    async listUsageMonths(filter) {
+      const expressionAttributeNames: Record<string, string> = {};
+      const expressionAttributeValues: Record<string, { N: string }> = {};
+      const filterParts: string[] = [];
+
+      if (filter.year) {
+        expressionAttributeNames['#year'] = 'year';
+        expressionAttributeValues[':year'] = { N: String(filter.year) };
+        filterParts.push('#year = :year');
+      }
+
+      if (filter.month) {
+        expressionAttributeNames['#month'] = 'month';
+        expressionAttributeValues[':month'] = { N: String(filter.month) };
+        filterParts.push('#month = :month');
+      }
+
+      const requestBody: Record<string, unknown> = {
+        TableName: tableName,
+        ProjectionExpression:
+          'connectionId,meteringPointId,#year,#month,hasQuarterHourData,resolutions,measurementCount,channelCount,rawS3Bucket,rawS3Key,importedAt',
+        ExpressionAttributeNames: {
+          '#year': 'year',
+          '#month': 'month',
+          ...expressionAttributeNames,
+        },
+      };
+
+      if (filterParts.length) {
+        requestBody.FilterExpression = filterParts.join(' AND ');
+        requestBody.ExpressionAttributeValues = expressionAttributeValues;
+      }
+
+      const response = await dynamoRequest(
+        fetchImpl,
+        region,
+        'DynamoDB_20120810.Scan',
+        JSON.stringify(requestBody),
+      );
+
+      if (!response.ok) {
+        throw new Error(`DynamoDB usage scan failed with status ${response.status}.`);
+      }
+
+      const body = (await response.json()) as { Items?: Array<Record<string, DynamoAttribute>> };
+
+      return (body.Items || [])
+        .map(usageSummaryFromDynamo)
+        .sort((a, b) =>
+          `${a.connectionId}:${a.meteringPointId}:${a.year}:${a.month}`.localeCompare(
+            `${b.connectionId}:${b.meteringPointId}:${b.year}:${b.month}`,
+          ),
+        );
+    },
+    async getUsageMonth(input) {
+      const paddedMonth = String(input.month).padStart(2, '0');
+      const response = await dynamoRequest(
+        fetchImpl,
+        region,
+        'DynamoDB_20120810.GetItem',
+        JSON.stringify({
+          TableName: tableName,
+          Key: {
+            pk: { S: `EAN#${input.connectionId}` },
+            sk: { S: `MONTH#${input.year}-${paddedMonth}#MP#${input.meteringPointId}` },
+          },
+        }),
+      );
+
+      if (!response.ok) {
+        throw new Error(`DynamoDB usage get failed with status ${response.status}.`);
+      }
+
+      const itemBody = (await response.json()) as { Item?: Record<string, DynamoAttribute> };
+
+      if (!itemBody.Item) {
+        return undefined;
+      }
+
+      const summary = usageSummaryFromDynamo(itemBody.Item);
+      const rawResponse = await s3Request(fetchImpl, 'GET', summary.rawS3Bucket, region, summary.rawS3Key);
+
+      if (!rawResponse.ok) {
+        throw new Error(`S3 usage read failed with status ${rawResponse.status}.`);
+      }
+
+      return { summary, rawResponse: await rawResponse.json() };
     },
   };
 }
@@ -755,6 +950,151 @@ async function importUsageMonthBulk(
   });
 }
 
+function flattenMeasurements(rawResponse: unknown) {
+  if (!Array.isArray(rawResponse)) {
+    return [];
+  }
+
+  const rows: Array<{
+    channelId: string;
+    timestamp: number;
+    datetimeUtc: string;
+    value: unknown;
+    origin: unknown;
+    status: unknown;
+  }> = [];
+
+  for (const channel of rawResponse) {
+    if (typeof channel !== 'object' || channel === null) {
+      continue;
+    }
+
+    const channelRecord = channel as Record<string, unknown>;
+    const channelId = typeof channelRecord.channelId === 'string' ? channelRecord.channelId : '';
+    const measurements = channelRecord.Measurements;
+
+    if (!Array.isArray(measurements)) {
+      continue;
+    }
+
+    for (const measurement of measurements) {
+      if (typeof measurement !== 'object' || measurement === null) {
+        continue;
+      }
+
+      const measurementRecord = measurement as Record<string, unknown>;
+      const timestamp = Number(measurementRecord.timestamp);
+
+      rows.push({
+        channelId,
+        timestamp,
+        datetimeUtc: Number.isFinite(timestamp) ? new Date(timestamp * 1000).toISOString() : '',
+        value: measurementRecord.value,
+        origin: measurementRecord.origin,
+        status: measurementRecord.status,
+      });
+    }
+  }
+
+  return rows;
+}
+
+function csvCell(value: unknown): string {
+  const stringValue = value === undefined || value === null ? '' : String(value);
+
+  if (/[",\n\r]/.test(stringValue)) {
+    return `"${stringValue.replaceAll('"', '""')}"`;
+  }
+
+  return stringValue;
+}
+
+function rowsToCsv(summary: UsageMonthSummary, rows: ReturnType<typeof flattenMeasurements>): string {
+  const header = [
+    'connectionId',
+    'meteringPointId',
+    'year',
+    'month',
+    'channelId',
+    'timestamp',
+    'datetimeUtc',
+    'value',
+    'origin',
+    'status',
+  ];
+  const body = rows.map((row) =>
+    [
+      summary.connectionId,
+      summary.meteringPointId,
+      summary.year,
+      summary.month,
+      row.channelId,
+      row.timestamp,
+      row.datetimeUtc,
+      row.value,
+      row.origin,
+      row.status,
+    ]
+      .map(csvCell)
+      .join(','),
+  );
+
+  return [header.join(','), ...body].join('\n');
+}
+
+async function getStoredUsageValues(store: UsageStore | undefined, query: URLSearchParams) {
+  if (!store) {
+    return jsonResponse(500, { error: 'Usage storage is not configured.' });
+  }
+
+  const input = parseUsageMonthQuery(query);
+  const storedUsage = await store.getUsageMonth(input);
+
+  if (!storedUsage) {
+    return jsonResponse(404, { error: 'Stored usage month not found.' });
+  }
+
+  const rows = flattenMeasurements(storedUsage.rawResponse);
+
+  return jsonResponse(200, {
+    summary: storedUsage.summary,
+    rowCount: rows.length,
+    rows,
+  });
+}
+
+async function getStoredUsageCsv(store: UsageStore | undefined, query: URLSearchParams) {
+  if (!store) {
+    return jsonResponse(500, { error: 'Usage storage is not configured.' });
+  }
+
+  const input = parseUsageMonthQuery(query);
+  const storedUsage = await store.getUsageMonth(input);
+
+  if (!storedUsage) {
+    return jsonResponse(404, { error: 'Stored usage month not found.' });
+  }
+
+  return textResponse(
+    200,
+    rowsToCsv(storedUsage.summary, flattenMeasurements(storedUsage.rawResponse)),
+    'text/csv; charset=utf-8',
+  );
+}
+
+async function listStoredUsageMonths(store: UsageStore | undefined, query: URLSearchParams) {
+  if (!store) {
+    return jsonResponse(500, { error: 'Usage storage is not configured.' });
+  }
+
+  const items = await store.listUsageMonths(parseOptionalUsageMonthFilter(query));
+
+  return jsonResponse(200, {
+    count: items.length,
+    items,
+  });
+}
+
 export function createHandler(
   fetchImpl: FetchLike = fetch,
   meterStore = createS3MeterStore(fetchImpl),
@@ -799,6 +1139,18 @@ export function createHandler(
       if (method === 'POST' && path === '/usage/month/bulk') {
         const body = parseJsonBody(event.body, event.isBase64Encoded);
         return importUsageMonthBulk(fetchImpl, meterStore, usageStore, body);
+      }
+
+      if (method === 'GET' && path === '/usage/month/list') {
+        return listStoredUsageMonths(usageStore, query);
+      }
+
+      if (method === 'GET' && path === '/usage/month/values') {
+        return getStoredUsageValues(usageStore, query);
+      }
+
+      if (method === 'GET' && path === '/usage/month/csv') {
+        return getStoredUsageCsv(usageStore, query);
       }
 
       if (method === 'POST' && path === '/fetch-url') {

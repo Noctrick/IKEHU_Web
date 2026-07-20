@@ -343,3 +343,112 @@ test('bulk monthly usage route imports every metering point from cached meters',
     ],
   );
 });
+
+test('stored monthly usage values route returns flattened measurement rows', async () => {
+  const handler = createHandler(
+    async () => {
+      throw new Error('fetch should not be called');
+    },
+    undefined,
+    {
+      async putUsageMonth() {
+        throw new Error('put should not be called');
+      },
+      async listUsageMonths() {
+        throw new Error('list should not be called');
+      },
+      async getUsageMonth() {
+        return {
+          summary: {
+            connectionId: '871690460000012374',
+            meteringPointId: '00053131',
+            year: 2026,
+            month: 7,
+            hasQuarterHourData: true,
+            resolutions: ['15min'],
+            measurementCount: 2,
+            rawS3Bucket: 'bucket',
+            rawS3Key: 'key',
+          },
+          rawResponse: [
+            {
+              channelId: '16180',
+              measurementResolutions: [{ resolution: '15min', start: 1782857700, end: 1782858600 }],
+              Measurements: [
+                { timestamp: 1782857700, value: 3.5, origin: 'Measured', status: 'Valid' },
+                { timestamp: 1782858600, value: 3, origin: 'Measured', status: 'Valid' },
+              ],
+            },
+          ],
+        };
+      },
+    },
+  );
+
+  const response = await handler({
+    rawPath: '/usage/month/values',
+    rawQueryString: 'connectionId=871690460000012374&meteringPointId=00053131&year=2026&month=7',
+    requestContext: { http: { method: 'GET' } },
+  });
+  const body = JSON.parse(response.body);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(body.rows.length, 2);
+  assert.deepEqual(body.rows[0], {
+    channelId: '16180',
+    timestamp: 1782857700,
+    datetimeUtc: '2026-06-30T22:15:00.000Z',
+    value: 3.5,
+    origin: 'Measured',
+    status: 'Valid',
+  });
+});
+
+test('stored monthly usage csv route returns Excel compatible CSV', async () => {
+  const handler = createHandler(
+    async () => {
+      throw new Error('fetch should not be called');
+    },
+    undefined,
+    {
+      async putUsageMonth() {
+        throw new Error('put should not be called');
+      },
+      async listUsageMonths() {
+        throw new Error('list should not be called');
+      },
+      async getUsageMonth() {
+        return {
+          summary: {
+            connectionId: '871690460000012374',
+            meteringPointId: '00053131',
+            year: 2026,
+            month: 7,
+            hasQuarterHourData: true,
+            resolutions: ['15min'],
+            measurementCount: 1,
+            rawS3Bucket: 'bucket',
+            rawS3Key: 'key',
+          },
+          rawResponse: [
+            {
+              channelId: '16180',
+              Measurements: [{ timestamp: 1782857700, value: 3.5, origin: 'Measured', status: 'Valid' }],
+            },
+          ],
+        };
+      },
+    },
+  );
+
+  const response = await handler({
+    rawPath: '/usage/month/csv',
+    rawQueryString: 'connectionId=871690460000012374&meteringPointId=00053131&year=2026&month=7',
+    requestContext: { http: { method: 'GET' } },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers['Content-Type'], 'text/csv; charset=utf-8');
+  assert.match(response.body, /connectionId,meteringPointId,year,month,channelId,timestamp,datetimeUtc,value,origin,status/);
+  assert.match(response.body, /871690460000012374,00053131,2026,7,16180,1782857700,2026-06-30T22:15:00.000Z,3.5,Measured,Valid/);
+});

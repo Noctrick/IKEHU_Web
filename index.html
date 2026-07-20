@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IKEHU Kenter API Tester</title>
+  <script type="module" crossorigin src="/IKEHU_Web/assets/index-Di-W5mHF.js"></script>
+  <link rel="stylesheet" crossorigin href="/IKEHU_Web/assets/index-qOJJwxxC.css">
+</head>
+<body>
+    <main>
+        <section class="shell" aria-labelledby="page-title">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">IKEHU webapp</p>
+                    <h1 id="page-title">Kenter API tester</h1>
+                </div>
+                <div class="status-pill" id="status-text">Ready</div>
+            </header>
+
+            <section class="panel">
+                <label for="api-url">Lambda API URL</label>
+                <input
+                    id="api-url"
+                    type="url"
+                    placeholder="https://abc123.execute-api.eu-central-1.amazonaws.com"
+                    autocomplete="off"
+                >
+            </section>
+
+            <section class="actions" aria-label="API actions">
+                <button id="test-health" type="button">Test health</button>
+                <button id="get-meters" type="button">Get meters</button>
+                <button id="get-modified" type="button">Get modified</button>
+            </section>
+
+            <section class="panel">
+                <label for="measurement-url">One measurement URL</label>
+                <div class="inline-control">
+                    <input
+                        id="measurement-url"
+                        type="text"
+                        placeholder="/meetdata/v2/measurements/connections/.../days/2026/7/19"
+                        autocomplete="off"
+                    >
+                    <button id="fetch-url" type="button">Fetch</button>
+                </div>
+            </section>
+
+            <section class="result-panel" aria-labelledby="result-title">
+                <div class="result-header">
+                    <h2 id="result-title">Response</h2>
+                    <div class="result-actions">
+                        <button id="copy-json" type="button">Copy</button>
+                        <button id="download-json" type="button">Download</button>
+                    </div>
+                </div>
+                <pre id="json-output">Click an action to test the Lambda-backed Kenter API.</pre>
+            </section>
+        </section>
+    </main>
+</body>
+</html>

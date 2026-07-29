@@ -395,12 +395,9 @@ test('stored monthly usage values route returns flattened measurement rows', asy
   assert.equal(response.statusCode, 200);
   assert.equal(body.rows.length, 2);
   assert.deepEqual(body.rows[0], {
-    channelId: '16180',
-    timestamp: 1782857700,
-    datetimeUtc: '2026-06-30T22:15:00.000Z',
-    value: 3.5,
-    origin: 'Measured',
-    status: 'Valid',
+    'Dag/tijdstip/kwartier': '2026-07-01 00:15',
+    'EAN code': '871690460000012374',
+    verbruik: 3.5,
   });
 });
 
@@ -449,6 +446,6 @@ test('stored monthly usage csv route returns Excel compatible CSV', async () => 
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers['Content-Type'], 'text/csv; charset=utf-8');
-  assert.match(response.body, /connectionId,meteringPointId,year,month,channelId,timestamp,datetimeUtc,value,origin,status/);
-  assert.match(response.body, /871690460000012374,00053131,2026,7,16180,1782857700,2026-06-30T22:15:00.000Z,3.5,Measured,Valid/);
+  assert.match(response.body, /Dag\/tijdstip\/kwartier,EAN code,verbruik/);
+  assert.match(response.body, /2026-07-01 00:15,871690460000012374,3.5/);
 });

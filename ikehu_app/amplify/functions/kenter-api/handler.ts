@@ -950,18 +950,41 @@ async function importUsageMonthBulk(
   });
 }
 
-function flattenMeasurements(rawResponse: unknown) {
+function formatAmsterdamDateTime(timestamp: number): string {
+  if (!Number.isFinite(timestamp)) {
+    return '';
+  }
+
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Amsterdam',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+    .formatToParts(new Date(timestamp * 1000))
+    .reduce<Record<string, string>>((acc, part) => {
+      if (part.type !== 'literal') {
+        acc[part.type] = part.value;
+      }
+
+      return acc;
+    }, {});
+
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+function flattenMeasurements(summary: UsageMonthSummary, rawResponse: unknown) {
   if (!Array.isArray(rawResponse)) {
     return [];
   }
 
   const rows: Array<{
-    channelId: string;
-    timestamp: number;
-    datetimeUtc: string;
-    value: unknown;
-    origin: unknown;
-    status: unknown;
+    'Dag/tijdstip/kwartier': string;
+    'EAN code': string;
+    verbruik: unknown;
   }> = [];
 
   for (const channel of rawResponse) {
@@ -970,7 +993,6 @@ function flattenMeasurements(rawResponse: unknown) {
     }
 
     const channelRecord = channel as Record<string, unknown>;
-    const channelId = typeof channelRecord.channelId === 'string' ? channelRecord.channelId : '';
     const measurements = channelRecord.Measurements;
 
     if (!Array.isArray(measurements)) {
@@ -986,12 +1008,9 @@ function flattenMeasurements(rawResponse: unknown) {
       const timestamp = Number(measurementRecord.timestamp);
 
       rows.push({
-        channelId,
-        timestamp,
-        datetimeUtc: Number.isFinite(timestamp) ? new Date(timestamp * 1000).toISOString() : '',
-        value: measurementRecord.value,
-        origin: measurementRecord.origin,
-        status: measurementRecord.status,
+        'Dag/tijdstip/kwartier': formatAmsterdamDateTime(timestamp),
+        'EAN code': summary.connectionId,
+        verbruik: measurementRecord.value,
       });
     }
   }
@@ -1009,32 +1028,10 @@ function csvCell(value: unknown): string {
   return stringValue;
 }
 
-function rowsToCsv(summary: UsageMonthSummary, rows: ReturnType<typeof flattenMeasurements>): string {
-  const header = [
-    'connectionId',
-    'meteringPointId',
-    'year',
-    'month',
-    'channelId',
-    'timestamp',
-    'datetimeUtc',
-    'value',
-    'origin',
-    'status',
-  ];
+function rowsToCsv(rows: ReturnType<typeof flattenMeasurements>): string {
+  const header = ['Dag/tijdstip/kwartier', 'EAN code', 'verbruik'];
   const body = rows.map((row) =>
-    [
-      summary.connectionId,
-      summary.meteringPointId,
-      summary.year,
-      summary.month,
-      row.channelId,
-      row.timestamp,
-      row.datetimeUtc,
-      row.value,
-      row.origin,
-      row.status,
-    ]
+    [row['Dag/tijdstip/kwartier'], row['EAN code'], row.verbruik]
       .map(csvCell)
       .join(','),
   );
@@ -1054,7 +1051,7 @@ async function getStoredUsageValues(store: UsageStore | undefined, query: URLSea
     return jsonResponse(404, { error: 'Stored usage month not found.' });
   }
 
-  const rows = flattenMeasurements(storedUsage.rawResponse);
+  const rows = flattenMeasurements(storedUsage.summary, storedUsage.rawResponse);
 
   return jsonResponse(200, {
     summary: storedUsage.summary,
@@ -1077,7 +1074,7 @@ async function getStoredUsageCsv(store: UsageStore | undefined, query: URLSearch
 
   return textResponse(
     200,
-    rowsToCsv(storedUsage.summary, flattenMeasurements(storedUsage.rawResponse)),
+    rowsToCsv(flattenMeasurements(storedUsage.summary, storedUsage.rawResponse)),
     'text/csv; charset=utf-8',
   );
 }
